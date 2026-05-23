@@ -475,11 +475,11 @@ async function main() {
   }
 
   // Inserción en lotes de 100
-  const BATCH = 100
+  /*const BATCH = 100
   for (let i = 0; i < lecturas.length; i += BATCH) {
     await prisma.lecturas_sensor.createMany({ data: lecturas.slice(i, i + BATCH) })
   }
-  console.log(`  ✓ ${lecturas.length} lecturas insertadas\n`)
+  console.log(`  ✓ ${lecturas.length} lecturas insertadas\n`)*/
 
   // ══════════════════════════════════════════════════════
   // 10. EVENTOS DE RIEGO
