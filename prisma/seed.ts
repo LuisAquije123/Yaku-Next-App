@@ -1,664 +1,346 @@
-// prisma/seed.ts
-// =====================================================================
-// Seed — AgroSense / Yaku Dashboard
-// Riego inteligente de tomates · Lima, Perú · Mayo 2026
-// =====================================================================
-// Ejecutar con: npx prisma db seed
-// Requiere en package.json:
-//   "prisma": { "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts" }
-// =====================================================================
-
-import { PrismaClient, Prisma } from "@/generated/prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import  prisma  from '../src/lib/prisma'
-import { hash as argon2Hash, verify } from 'argon2'
-
-// ─────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────
-
-const hash = async (pwd: string): Promise<string> => {
-  return await argon2Hash(pwd, { 
-    type: 2, // ARGON2_ID
-    memoryCost: 19 * 1024, // 19 MB
-    timeCost: 2,
-    parallelism: 1
-  })
-}
-
-/** Crea una fecha exacta en Mayo 2026 */
-const f = (dia: number, hora: number, minuto = 0): Date =>
-  new Date(2026, 4, dia, hora, minuto, 0)   // mes 4 = Mayo (0-index)
-
-/** Redondea a 2 decimales */
-const r2 = (n: number): number => Math.round(n * 100) / 100
-
-/** Ruido aleatorio simétrico */
-const ruido = (mag: number): number => (Math.random() - 0.5) * 2 * mag
-
-// ── Modelos climáticos realistas Lima (otoño: mayo) ──────────────────
-// Temperatura ambiental: 18-23°C, pico a las 14h
-const modeloTempAmb = (hora: number): number =>
-  r2(20.5 + Math.sin(((hora - 6) * Math.PI) / 12) * 2.8 + ruido(0.4))
-
-// Humedad ambiental: 85-93%, inversa a la temperatura
-const modeloHumAmb = (hora: number): number =>
-  r2(Math.min(97, Math.max(82, 89.5 - Math.sin(((hora - 6) * Math.PI) / 12) * 4.5 + ruido(0.8))))
-
-// Temperatura suelo: 19-22°C, inercia térmica (desfase de 2h)
-const modeloTempSuelo = (hora: number): number =>
-  r2(20.0 + Math.sin(((hora - 8) * Math.PI) / 12) * 1.4 + ruido(0.3))
-
-// Humedad suelo: cae con temperatura, se resetea con riego
-// Retorna [valor, esRiego]
-let humSuelo = 72.0
-const modeloHumSuelo = (hora: number, resetear = false): number => {
-  if (resetear) { humSuelo = 72.0 + ruido(3); return r2(humSuelo) }
-  // Caída: ~2.5% por 2h, acelerada si hace calor (mediodía)
-  const factor = hora >= 11 && hora <= 16 ? 3.2 : 1.8
-  humSuelo = Math.max(36, humSuelo - factor + ruido(0.6))
-  return r2(humSuelo)
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// LIMPIEZA (orden inverso de dependencias)
-// ─────────────────────────────────────────────────────────────────────
-
-async function limpiar() {
-  console.log('🗑  Limpiando tablas...')
-  await prisma.logs_sistema.deleteMany()
-  await prisma.alertas.deleteMany()
-  await prisma.predicciones.deleteMany()
-  await prisma.modelo_ml.deleteMany()
-  await prisma.riego.deleteMany()
-  await prisma.lecturas_sensor.deleteMany()
-  await prisma.sensores.deleteMany()
-  await prisma.dispositivos.deleteMany()
-  await prisma.cultivos.deleteMany()
-  await prisma.plantas.deleteMany()
-  await prisma.usuarios.deleteMany()
-  await prisma.roles_permisos.deleteMany()
-  await prisma.permisos.deleteMany()
-  await prisma.roles.deleteMany()
-  console.log('✅ Tablas limpias\n')
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// MAIN
-// ─────────────────────────────────────────────────────────────────────
+import { Prisma } from "@/generated/prisma/client";
+import prisma from "../src/lib/prisma";
 
 async function main() {
-  console.log('🌱 Iniciando seed AgroSense — Yaku Dashboard\n')
-  console.log('═'.repeat(55))
-
-  await limpiar()
-
-  // ══════════════════════════════════════════════════════
-  // 1. ROLES
-  // ══════════════════════════════════════════════════════
-  console.log('📋 Creando roles...')
-
-  const rolAdmin = await prisma.roles.create({
-    data: { nombre: 'Administrador', descripcion: 'Acceso total al sistema' }
-  })
-  const rolAgricultor = await prisma.roles.create({
-    data: { nombre: 'Agricultor', descripcion: 'Gestión de cultivos y monitoreo' }
-  })
-  const rolVisor = await prisma.roles.create({
-    data: { nombre: 'Visor', descripcion: 'Solo lectura de datos y reportes' }
-  })
-
-  console.log(`  ✓ ${rolAdmin.nombre} (id: ${rolAdmin.id_rol})`)
-  console.log(`  ✓ ${rolAgricultor.nombre} (id: ${rolAgricultor.id_rol})`)
-  console.log(`  ✓ ${rolVisor.nombre} (id: ${rolVisor.id_rol})\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 2. PERMISOS
-  // ══════════════════════════════════════════════════════
-  console.log('🔑 Creando permisos...')
-
-  const [
-    pDashboard, pControlRiego, pVerLecturas,
-    pGestUsuarios, pVerReportes, pGestCultivos,
-    pGestDispositivos, pVerAlertas, pVerPredicciones
-  ] = await Promise.all([
-    prisma.permisos.create({ data: { nombre: 'ver_dashboard',         descripcion: 'Ver el dashboard principal en tiempo real' } }),
-    prisma.permisos.create({ data: { nombre: 'controlar_riego',       descripcion: 'Encender/apagar la bomba manualmente' } }),
-    prisma.permisos.create({ data: { nombre: 'ver_lecturas',          descripcion: 'Ver histórico de lecturas de sensores' } }),
-    prisma.permisos.create({ data: { nombre: 'gestionar_usuarios',    descripcion: 'CRUD de usuarios y roles' } }),
-    prisma.permisos.create({ data: { nombre: 'ver_reportes',          descripcion: 'Exportar reportes CSV y ver comparativas' } }),
-    prisma.permisos.create({ data: { nombre: 'gestionar_cultivos',    descripcion: 'Crear y editar cultivos' } }),
-    prisma.permisos.create({ data: { nombre: 'gestionar_dispositivos',descripcion: 'Registrar y configurar dispositivos IoT' } }),
-    prisma.permisos.create({ data: { nombre: 'ver_alertas',           descripcion: 'Ver y gestionar alertas del sistema' } }),
-    prisma.permisos.create({ data: { nombre: 'ver_predicciones',      descripcion: 'Ver predicciones del modelo ML' } }),
-  ])
-
-  console.log(`  ✓ 9 permisos creados\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 3. ROLES ↔ PERMISOS
-  // ══════════════════════════════════════════════════════
-  console.log('🔗 Asignando permisos a roles...')
-
-  // Administrador: todos los permisos
-  const permisosAdmin = [
-    pDashboard, pControlRiego, pVerLecturas, pGestUsuarios,
-    pVerReportes, pGestCultivos, pGestDispositivos, pVerAlertas, pVerPredicciones
-  ]
-  for (const p of permisosAdmin) {
-    await prisma.roles_permisos.create({
-      data: { id_rol: rolAdmin.id_rol, id_permiso: p.id_permiso }
-    })
-  }
-
-  // Agricultor: operaciones del campo
-  const permisosAgricultor = [
-    pDashboard, pControlRiego, pVerLecturas,
-    pVerReportes, pGestCultivos, pVerAlertas, pVerPredicciones
-  ]
-  for (const p of permisosAgricultor) {
-    await prisma.roles_permisos.create({
-      data: { id_rol: rolAgricultor.id_rol, id_permiso: p.id_permiso }
-    })
-  }
-
-  // Visor: solo lectura
-  const permisosVisor = [pDashboard, pVerLecturas, pVerReportes, pVerAlertas, pVerPredicciones]
-  for (const p of permisosVisor) {
-    await prisma.roles_permisos.create({
-      data: { id_rol: rolVisor.id_rol, id_permiso: p.id_permiso }
-    })
-  }
-
-  console.log(`  ✓ Admin: ${permisosAdmin.length} permisos`)
-  console.log(`  ✓ Agricultor: ${permisosAgricultor.length} permisos`)
-  console.log(`  ✓ Visor: ${permisosVisor.length} permisos\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 4. USUARIOS
-  // ══════════════════════════════════════════════════════
-  console.log('👤 Creando usuarios...')
-
-  // Pre-compute password hashes
-  const hashAdmin = await hash('Admin2026!')
-  const hashAgro = await hash('Agro2026!')
-  const hashVisor = await hash('Visor2026!')
-
-  const admin = await prisma.usuarios.create({
-    data: {
-      nombre:         'Luis Rodríguez',
-      correo:         'admin@agrosense.pe',
-      contrasena:     hashAdmin,
-      id_rol:         rolAdmin.id_rol,
-      estado:         true,
-      fecha_registro: f(1, 9)
-    }
-  })
-
-  const agric1 = await prisma.usuarios.create({
-    data: {
-      nombre:         'Carlos Quispe',
-      correo:         'carlos.quispe@agrosense.pe',
-      contrasena:     hashAgro,
-      id_rol:         rolAgricultor.id_rol,
-      estado:         true,
-      fecha_registro: f(2, 10)
-    }
-  })
-
-  const agric2 = await prisma.usuarios.create({
-    data: {
-      nombre:         'María Flores',
-      correo:         'maria.flores@agrosense.pe',
-      contrasena:     hashAgro,
-      id_rol:         rolAgricultor.id_rol,
-      estado:         true,
-      fecha_registro: f(3, 11)
-    }
-  })
-
-  const visor = await prisma.usuarios.create({
-    data: {
-      nombre:         'Javier Torres (Asesor)',
-      correo:         'asesor@uni.pe',
-      contrasena:     hashVisor,
-      id_rol:         rolVisor.id_rol,
-      estado:         true,
-      fecha_registro: f(4, 9)
-    }
-  })
-
-  console.log(`  ✓ ${admin.nombre} — admin`)
-  console.log(`  ✓ ${agric1.nombre} — agricultor`)
-  console.log(`  ✓ ${agric2.nombre} — agricultor`)
-  console.log(`  ✓ ${visor.nombre} — visor\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 5. PLANTAS
-  // ══════════════════════════════════════════════════════
-  console.log('🌱 Creando plantas...')
-
-  const tomateCherry = await prisma.plantas.create({
-    data: {
-      nombre:               'Tomate Cherry',
-      tipo:                 'Hortaliza',
-      requerimiento_hidrico:'moderado',
-      descripcion:          'Variedad pequeña de tomate. Ciclo 70-90 días. Óptimo: hum. suelo 60-80%, temp. 18-29°C, temp. suelo 18-24°C.'
-    }
-  })
-
-  const tomatePera = await prisma.plantas.create({
-    data: {
-      nombre:               'Tomate Pera',
-      tipo:                 'Hortaliza',
-      requerimiento_hidrico:'moderado',
-      descripcion:          'Variedad alargada ideal para salsas. Ciclo 75-95 días. Sensible a exceso de agua en etapa de maduración.'
-    }
-  })
-
-  const lechuga = await prisma.plantas.create({
-    data: {
-      nombre:               'Lechuga Romana',
-      tipo:                 'Hortaliza de hoja',
-      requerimiento_hidrico:'alto',
-      descripcion:          'Cultivo de ciclo corto (35-50 días). Alta demanda hídrica. Ideal para comparativas de sistema de riego.'
-    }
-  })
-
-  console.log(`  ✓ ${tomateCherry.nombre}`)
-  console.log(`  ✓ ${tomatePera.nombre}`)
-  console.log(`  ✓ ${lechuga.nombre}\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 6. CULTIVOS
-  // ══════════════════════════════════════════════════════
-  console.log('🌿 Creando cultivos...')
-
-  // Cultivo principal — Tomate Cherry Fase Reactiva (activo)
-  const cultivoActivo = await prisma.cultivos.create({
-    data: {
-      id_usuario:    agric1.id_usuario,
-      id_planta:     tomateCherry.id_planta,
-      nombre:        'Maceta #1 — Tomate Cherry · Fase Reactiva',
-      etapa:         'floracion',
-      area_m2:       new Prisma.Decimal(0.25),
-      fecha_siembra: new Date('2026-03-12'),
-      estado:        'activo'
-    }
-  })
-
-  // Cultivo 2 — Tomate Cherry Fase ML (activo)
-  const cultivoML = await prisma.cultivos.create({
-    data: {
-      id_usuario:    agric1.id_usuario,
-      id_planta:     tomateCherry.id_planta,
-      nombre:        'Maceta #2 — Tomate Cherry · Fase Predictiva ML',
-      etapa:         'fructificacion',
-      area_m2:       new Prisma.Decimal(0.25),
-      fecha_siembra: new Date('2026-03-12'),
-      estado:        'activo'
-    }
-  })
-
-  // Cultivo 3 — Tomate Pera finalizado (control manual)
-  const cultivoControl = await prisma.cultivos.create({
-    data: {
-      id_usuario:    agric2.id_usuario,
-      id_planta:     tomatePera.id_planta,
-      nombre:        'Maceta #3 — Tomate Pera · Control Manual',
-      etapa:         'maduracion',
-      area_m2:       new Prisma.Decimal(0.30),
-      fecha_siembra: new Date('2026-02-01'),
-      estado:        'finalizado'
-    }
-  })
-
-  console.log(`  ✓ ${cultivoActivo.nombre} (id: ${cultivoActivo.id_cultivo})`)
-  console.log(`  ✓ ${cultivoML.nombre} (id: ${cultivoML.id_cultivo})`)
-  console.log(`  ✓ ${cultivoControl.nombre} (id: ${cultivoControl.id_cultivo})\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 7. DISPOSITIVOS
-  // ══════════════════════════════════════════════════════
-  console.log('📡 Creando dispositivos...')
-
-  const rpi5 = await prisma.dispositivos.create({
-    data: {
-      nombre:         'Raspberry Pi 5 — Nodo Central Gateway',
-      ubicacion:      'Laboratorio IoT — Mesa central',
-      estado:         'activo',
-      fecha_registro: f(1, 8)
-    }
-  })
-
-  const esp32s3 = await prisma.dispositivos.create({
-    data: {
-      nombre:         'ESP32-S3 — Nodo de Sensores',
-      ubicacion:      'Maceta #1 y #2 — Zona de cultivo',
-      estado:         'activo',
-      fecha_registro: f(1, 8, 15)
-    }
-  })
-
-  const esp32act = await prisma.dispositivos.create({
-    data: {
-      nombre:         'ESP32 — Nodo de Actuación',
-      ubicacion:      'Depósito de agua — Zona de riego',
-      estado:         'activo',
-      fecha_registro: f(1, 8, 30)
-    }
-  })
-
-  console.log(`  ✓ ${rpi5.nombre}`)
-  console.log(`  ✓ ${esp32s3.nombre}`)
-  console.log(`  ✓ ${esp32act.nombre}\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 8. SENSORES
-  // ══════════════════════════════════════════════════════
-  console.log('🌡  Creando sensores...')
-
-  const sensorHumSuelo = await prisma.sensores.create({
-    data: { id_dispositivo: esp32s3.id_dispositivo, tipo_sensor: 'YL-69',     unidad: '%',   estado: 'activo' }
-  })
-  const sensorHumAmb = await prisma.sensores.create({
-    data: { id_dispositivo: esp32s3.id_dispositivo, tipo_sensor: 'DHT22-humedad',    unidad: '%',   estado: 'activo' }
-  })
-  const sensorTempAmb = await prisma.sensores.create({
-    data: { id_dispositivo: esp32s3.id_dispositivo, tipo_sensor: 'DHT22-temperatura',unidad: '°C',  estado: 'activo' }
-  })
-  const sensorTempSuelo = await prisma.sensores.create({
-    data: { id_dispositivo: esp32s3.id_dispositivo, tipo_sensor: 'DS18B20',          unidad: '°C',  estado: 'activo' }
-  })
-  const sensorFlujo = await prisma.sensores.create({
-    data: { id_dispositivo: esp32act.id_dispositivo,tipo_sensor: 'YF-S201',          unidad: 'L',   estado: 'activo' }
-  })
-  const sensorNivel = await prisma.sensores.create({
-    data: { id_dispositivo: esp32act.id_dispositivo,tipo_sensor: 'HC-SR04',          unidad: 'cm',  estado: 'activo' }
-  })
-
-  console.log(`  ✓ ${sensorHumSuelo.tipo_sensor}      (GPIO1 ADC)`)
-  console.log(`  ✓ ${sensorHumAmb.tipo_sensor}         (GPIO4)`)
-  console.log(`  ✓ ${sensorTempAmb.tipo_sensor}  (GPIO4)`)
-  console.log(`  ✓ ${sensorTempSuelo.tipo_sensor}            (GPIO5)`)
-  console.log(`  ✓ ${sensorFlujo.tipo_sensor}           (GPIO6)`)
-  console.log(`  ✓ ${sensorNivel.tipo_sensor}           (GPIO18)\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 9. LECTURAS DE SENSORES
-  // Mayo 15–21 · cada 2 horas · 4 variables
-  // ══════════════════════════════════════════════════════
-  console.log('📊 Generando lecturas de sensores (Mayo 15–21, cada 2h)...')
-
-  type Lectura = {
-    id_sensor:     number
-    id_cultivo:    number
-    valor:         Prisma.Decimal
-    tipo_variable: string
-    fecha_hora:    Date
-  }
-
-  const lecturas: Lectura[] = []
-  humSuelo = 72.0    // reset global antes de la simulación
-
-  // Mapeo: cultivoActivo usa sensores del ESP32-S3
-  // Generamos lecturas para cultivoActivo y cultivoML
-  const cultivosLecturas = [
-    { cultivo: cultivoActivo, offset: 0 },
-    { cultivo: cultivoML,     offset: 0.5 }, // pequeño offset en valores
-  ]
-
-  for (const { cultivo, offset } of cultivosLecturas) {
-    humSuelo = cultivo.id_cultivo === cultivoActivo.id_cultivo ? 72.0 : 68.0
-
-    for (let dia = 15; dia <= 21; dia++) {
-      for (let hora = 0; hora < 24; hora += 2) {
-
-        // Determinar si este punto es post-riego
-        // Riego cuando humSuelo < 43%
-        const esPostRiego = humSuelo < 43
-
-        const hS  = modeloHumSuelo(hora, esPostRiego)
-        const hA  = modeloHumAmb(hora)
-        const tA  = modeloTempAmb(hora)
-        const tS  = modeloTempSuelo(hora)
-        const nivel = r2(14.2 + ruido(2.1))  // nivel depósito ~14L sobre 20L
-
-        const ts = f(dia, hora)
-
-        // hum_suelo
-        lecturas.push({
-          id_sensor:     sensorHumSuelo.id_sensor,
-          id_cultivo:    cultivo.id_cultivo,
-          valor:         new Prisma.Decimal(r2(hS + offset)),
-          tipo_variable: 'humedad_suelo',
-          fecha_hora:    ts,
-        })
-
-        // hum_ambiental
-        lecturas.push({
-          id_sensor:     sensorHumAmb.id_sensor,
-          id_cultivo:    cultivo.id_cultivo,
-          valor:         new Prisma.Decimal(r2(hA + offset * 0.3)),
-          tipo_variable: 'humedad_ambiental',
-          fecha_hora:    ts,
-        })
-
-        // temp_ambiental
-        lecturas.push({
-          id_sensor:     sensorTempAmb.id_sensor,
-          id_cultivo:    cultivo.id_cultivo,
-          valor:         new Prisma.Decimal(r2(tA + offset * 0.2)),
-          tipo_variable: 'temperatura_ambiental',
-          fecha_hora:    ts,
-        })
-
-        // temp_suelo
-        lecturas.push({
-          id_sensor:     sensorTempSuelo.id_sensor,
-          id_cultivo:    cultivo.id_cultivo,
-          valor:         new Prisma.Decimal(r2(tS + offset * 0.1)),
-          tipo_variable: 'temperatura_suelo',
-          fecha_hora:    ts,
-        })
-
-        // nivel depósito
-        lecturas.push({
-          id_sensor:     sensorNivel.id_sensor,
-          id_cultivo:    cultivo.id_cultivo,
-          valor:         new Prisma.Decimal(nivel),
-          tipo_variable: 'nivel_agua',
-          fecha_hora:    ts,
-        })
-      }
-    }
-  }
-
-  // Inserción en lotes de 100
-  /*const BATCH = 100
-  for (let i = 0; i < lecturas.length; i += BATCH) {
-    await prisma.lecturas_sensor.createMany({ data: lecturas.slice(i, i + BATCH) })
-  }
-  console.log(`  ✓ ${lecturas.length} lecturas insertadas\n`)*/
-
-  // ══════════════════════════════════════════════════════
-  // 10. EVENTOS DE RIEGO
-  // ══════════════════════════════════════════════════════
-  console.log('💧 Creando eventos de riego...')
-
-  const riegosData = [
-    // Fase 1 control manual (cultivoControl)
-    { id_cultivo: cultivoControl.id_cultivo, id_dispositivo: esp32act.id_dispositivo, tipo: 'manual',    duracion: 45, estado: true,  fecha_hora: f(15, 8,  0)  },
-    { id_cultivo: cultivoControl.id_cultivo, id_dispositivo: esp32act.id_dispositivo, tipo: 'manual',    duracion: 52, estado: true,  fecha_hora: f(16, 7, 30)  },
-    { id_cultivo: cultivoControl.id_cultivo, id_dispositivo: esp32act.id_dispositivo, tipo: 'manual',    duracion: 40, estado: true,  fecha_hora: f(17, 8, 15)  },
-    { id_cultivo: cultivoControl.id_cultivo, id_dispositivo: esp32act.id_dispositivo, tipo: 'manual',    duracion: 58, estado: true,  fecha_hora: f(18, 9,  0)  },
-    // Fase 2 reactiva (cultivoActivo) — bomba automática por umbral
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'automatico',duracion: 30, estado: true,  fecha_hora: f(15, 14, 22) },
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'automatico',duracion: 28, estado: true,  fecha_hora: f(16, 10, 45) },
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'automatico',duracion: 33, estado: true,  fecha_hora: f(17, 14,  5) },
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'automatico',duracion: 27, estado: true,  fecha_hora: f(18, 11, 30) },
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'automatico',duracion: 31, estado: true,  fecha_hora: f(19, 13, 50) },
-    { id_cultivo: cultivoActivo.id_cultivo,  id_dispositivo: esp32act.id_dispositivo, tipo: 'manual',    duracion: 60, estado: true,  fecha_hora: f(20, 16,  0) },
-    // Fase 3 predictiva ML (cultivoML) — bomba por recomendación ML
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 22, estado: true,  fecha_hora: f(15, 13,  0) },
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 20, estado: true,  fecha_hora: f(16, 10, 10) },
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 25, estado: true,  fecha_hora: f(17, 12, 40) },
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 18, estado: true,  fecha_hora: f(18, 11,  5) },
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 23, estado: true,  fecha_hora: f(19, 13, 20) },
-    { id_cultivo: cultivoML.id_cultivo,      id_dispositivo: esp32act.id_dispositivo, tipo: 'predictivo',duracion: 21, estado: true,  fecha_hora: f(20, 10, 55) },
-  ]
-
-  await prisma.riego.createMany({ data: riegosData })
-  console.log(`  ✓ ${riegosData.length} eventos de riego creados\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 11. MODELO ML
-  // ══════════════════════════════════════════════════════
-  console.log('🧠 Creando modelo ML...')
-
-  const modelo = await prisma.modelo_ml.create({
-    data: {
-      nombre:              'AgroSense-RF-v3',
-      version:             'v3.0.1',
-      algoritmo:           'Random Forest Regressor',
-      fecha_entrenamiento: f(14, 22, 0),
-      parametros:          JSON.stringify({
-        n_estimators:     200,
-        max_depth:        10,
-        max_features:     'sqrt',
-        min_samples_leaf: 5,
-        random_state:     42
-      }),
-      metricas: JSON.stringify({
-        MAE:        3.81,
-        RMSE:       5.12,
-        R2:         0.924,
-        accuracy:   '87.5%',
-        train_size: 1240,
-        test_size:  310
-      })
-    }
-  })
-
-  console.log(`  ✓ ${modelo.nombre} — MAE: 3.81% — R²: 0.924\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 12. PREDICCIONES
-  // ══════════════════════════════════════════════════════
-  console.log('🔮 Creando predicciones ML...')
-
-  const prediccionesData = [
-    // Mayo 15-21, cada 2h aprox — predicciones para cultivoML
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(88.20), fecha_hora: f(15, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(82.50), fecha_hora: f(15, 10, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(91.30), fecha_hora: f(15, 12, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(85.70), fecha_hora: f(15, 14, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(79.10), fecha_hora: f(15, 16, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(83.40), fecha_hora: f(15, 18, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(77.80), fecha_hora: f(16, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(89.60), fecha_hora: f(16, 10, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(81.20), fecha_hora: f(16, 12, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(86.50), fecha_hora: f(17, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(92.10), fecha_hora: f(17, 12, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(84.30), fecha_hora: f(18, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(90.80), fecha_hora: f(18, 11, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(78.90), fecha_hora: f(19, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(87.40), fecha_hora: f(19, 13, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(80.60), fecha_hora: f(20, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(93.20), fecha_hora: f(20, 10, 0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(85.10), fecha_hora: f(21, 8,  0) },
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'no_regar',  probabilidad: new Prisma.Decimal(88.70), fecha_hora: f(21, 10, 0) },
-    // Predicción más reciente
-    { id_modelo: modelo.id_modelo, id_cultivo: cultivoML.id_cultivo, recomendacion: 'regar',     probabilidad: new Prisma.Decimal(91.50), fecha_hora: f(21, 14, 0) },
-  ]
-
-  await prisma.predicciones.createMany({ data: prediccionesData })
-  console.log(`  ✓ ${prediccionesData.length} predicciones creadas\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 13. ALERTAS
-  // ══════════════════════════════════════════════════════
-  console.log('🚨 Creando alertas...')
-
-  const alertasData = [
-    // Alertas resueltas históricas
-    { id_cultivo: cultivoActivo.id_cultivo, tipo: 'humedad_suelo_baja', mensaje: 'Humedad del suelo descendió a 38.2% — por debajo del umbral mínimo (40%)', nivel: 'critica',      estado: 'resuelta',  fecha_hora: f(15, 14, 18) },
-    { id_cultivo: cultivoActivo.id_cultivo, tipo: 'humedad_suelo_baja', mensaje: 'Humedad del suelo descendió a 41.1% — umbral de advertencia alcanzado',    nivel: 'advertencia',  estado: 'resuelta',  fecha_hora: f(16, 10, 40) },
-    { id_cultivo: cultivoML.id_cultivo,     tipo: 'prediccion_riego',   mensaje: 'Modelo ML recomienda riego preventivo en 35 min (confianza 91.3%)',         nivel: 'informativa',  estado: 'resuelta',  fecha_hora: f(15, 12, 25) },
-    { id_cultivo: cultivoActivo.id_cultivo, tipo: 'temperatura_alta',   mensaje: 'Temperatura ambiental superó 28°C durante 15 min — riesgo de floración',    nivel: 'advertencia',  estado: 'resuelta',  fecha_hora: f(17, 13, 10) },
-    { id_cultivo: cultivoML.id_cultivo,     tipo: 'prediccion_riego',   mensaje: 'Modelo ML recomienda riego preventivo en 42 min (confianza 89.6%)',         nivel: 'informativa',  estado: 'resuelta',  fecha_hora: f(16, 9,  50) },
-    { id_cultivo: cultivoControl.id_cultivo,tipo: 'humedad_suelo_baja', mensaje: 'Humedad del suelo cayó a 35.8% — cultivo con estrés hídrico detectado',     nivel: 'critica',      estado: 'resuelta',  fecha_hora: f(17, 15, 30) },
-    { id_cultivo: cultivoActivo.id_cultivo, tipo: 'bomba_sin_flujo',    mensaje: 'Bomba activa pero flujo detectado en 0 L/min por 35 seg — posible obstrucción', nivel: 'critica',   estado: 'resuelta',  fecha_hora: f(18, 11, 35) },
-    { id_cultivo: cultivoML.id_cultivo,     tipo: 'prediccion_riego',   mensaje: 'Modelo ML recomienda riego preventivo en 28 min (confianza 92.1%)',         nivel: 'informativa',  estado: 'resuelta',  fecha_hora: f(17, 12, 12) },
-    // Alertas activas (hoy)
-    { id_cultivo: cultivoActivo.id_cultivo, tipo: 'deposito_bajo',      mensaje: 'Nivel del depósito al 71% — se recomienda reponer agua antes de 4 días',    nivel: 'advertencia',  estado: 'activa',    fecha_hora: f(21, 9,  0)  },
-    { id_cultivo: cultivoML.id_cultivo,     tipo: 'prediccion_riego',   mensaje: 'Modelo ML recomienda riego preventivo en 42 min (confianza 91.5%)',         nivel: 'informativa',  estado: 'activa',    fecha_hora: f(21, 14, 0)  },
-  ]
-
-  await prisma.alertas.createMany({ data: alertasData })
-  console.log(`  ✓ ${alertasData.length} alertas creadas\n`)
-
-  // ══════════════════════════════════════════════════════
-  // 14. LOGS DEL SISTEMA
-  // ══════════════════════════════════════════════════════
-  console.log('📝 Creando logs del sistema...')
-
-  const logsData = [
-    { id_usuario: admin.id_usuario,   accion: 'LOGIN',                 descripcion: 'Sesión iniciada desde IP 192.168.1.10',                                    fecha_hora: f(14, 9,  0)  },
-    { id_usuario: admin.id_usuario,   accion: 'CREAR_DISPOSITIVO',     descripcion: `Registró dispositivo: ${rpi5.nombre}`,                                      fecha_hora: f(14, 9, 10)  },
-    { id_usuario: admin.id_usuario,   accion: 'CREAR_DISPOSITIVO',     descripcion: `Registró dispositivo: ${esp32s3.nombre}`,                                   fecha_hora: f(14, 9, 15)  },
-    { id_usuario: admin.id_usuario,   accion: 'CREAR_DISPOSITIVO',     descripcion: `Registró dispositivo: ${esp32act.nombre}`,                                  fecha_hora: f(14, 9, 20)  },
-    { id_usuario: admin.id_usuario,   accion: 'CREAR_USUARIO',         descripcion: `Creó usuario: ${agric1.correo} con rol Agricultor`,                         fecha_hora: f(14, 9, 30)  },
-    { id_usuario: admin.id_usuario,   accion: 'CREAR_USUARIO',         descripcion: `Creó usuario: ${agric2.correo} con rol Agricultor`,                         fecha_hora: f(14, 9, 35)  },
-    { id_usuario: agric1.id_usuario,  accion: 'LOGIN',                 descripcion: 'Sesión iniciada desde navegador Chrome / Windows',                          fecha_hora: f(15, 7, 58)  },
-    { id_usuario: agric1.id_usuario,  accion: 'CREAR_CULTIVO',         descripcion: `Registró cultivo: ${cultivoActivo.nombre}`,                                 fecha_hora: f(15, 8,  5)  },
-    { id_usuario: agric1.id_usuario,  accion: 'CREAR_CULTIVO',         descripcion: `Registró cultivo: ${cultivoML.nombre}`,                                     fecha_hora: f(15, 8, 10)  },
-    { id_usuario: agric1.id_usuario,  accion: 'CAMBIO_UMBRAL',         descripcion: 'Umbral humedad mínima modificado: 45% → 40% (Maceta #1)',                   fecha_hora: f(16, 12, 18) },
-    { id_usuario: agric1.id_usuario,  accion: 'RIEGO_MANUAL',          descripcion: 'Activó bomba manualmente por 60s — Maceta #1 (lectura: 39.5%)',             fecha_hora: f(20, 16,  0) },
-    { id_usuario: agric2.id_usuario,  accion: 'LOGIN',                 descripcion: 'Sesión iniciada desde navegador Firefox / Android',                         fecha_hora: f(17, 8, 15)  },
-    { id_usuario: agric2.id_usuario,  accion: 'VER_REPORTE',           descripcion: 'Exportó CSV de lecturas: May 15-17, Maceta #3',                             fecha_hora: f(18, 10, 45) },
-    { id_usuario: visor.id_usuario,   accion: 'LOGIN',                 descripcion: 'Sesión iniciada (rol Visor — acceso solo lectura)',                          fecha_hora: f(19, 11,  0) },
-    { id_usuario: admin.id_usuario,   accion: 'ENTRENAR_MODELO',       descripcion: `Modelo ${modelo.nombre} reentrenado — MAE: 3.81%, R²: 0.924`,              fecha_hora: f(14, 22,  0) },
-    { id_usuario: agric1.id_usuario,  accion: 'RESOLVER_ALERTA',       descripcion: 'Alerta "humedad_suelo_baja" marcada como resuelta — Maceta #1',             fecha_hora: f(15, 14, 25) },
-    { id_usuario: agric1.id_usuario,  accion: 'VER_PREDICCIONES',      descripcion: 'Consultó predicciones ML para Maceta #2 — últimas 24h',                    fecha_hora: f(21, 9, 30)  },
-    { id_usuario: visor.id_usuario,   accion: 'VER_COMPARATIVA',       descripcion: 'Accedió a comparativa de fases (manual vs reactivo vs ML)',                 fecha_hora: f(21, 11, 15) },
-  ]
-
-  await prisma.logs_sistema.createMany({ data: logsData })
-  console.log(`  ✓ ${logsData.length} logs creados\n`)
-
-  // ══════════════════════════════════════════════════════
-  // RESUMEN FINAL
-  // ══════════════════════════════════════════════════════
-  console.log('═'.repeat(55))
-  console.log('✅ Seed completado exitosamente\n')
-  console.log('📊 Resumen de datos insertados:')
-  console.log(`   Roles:              ${(await prisma.roles.count())}`)
-  console.log(`   Permisos:           ${(await prisma.permisos.count())}`)
-  console.log(`   Usuarios:           ${(await prisma.usuarios.count())}`)
-  console.log(`   Plantas:            ${(await prisma.plantas.count())}`)
-  console.log(`   Cultivos:           ${(await prisma.cultivos.count())}`)
-  console.log(`   Dispositivos:       ${(await prisma.dispositivos.count())}`)
-  console.log(`   Sensores:           ${(await prisma.sensores.count())}`)
-  console.log(`   Lecturas:           ${(await prisma.lecturas_sensor.count())}`)
-  console.log(`   Eventos de riego:   ${(await prisma.riego.count())}`)
-  console.log(`   Modelo ML:          ${(await prisma.modelo_ml.count())}`)
-  console.log(`   Predicciones:       ${(await prisma.predicciones.count())}`)
-  console.log(`   Alertas:            ${(await prisma.alertas.count())}`)
-  console.log(`   Logs:               ${(await prisma.logs_sistema.count())}`)
-  console.log('\n🔐 Credenciales de acceso:')
-  console.log('   admin@agrosense.pe         → Admin2026!')
-  console.log('   carlos.quispe@agrosense.pe → Agro2026!')
-  console.log('   maria.flores@agrosense.pe  → Agro2026!')
-  console.log('   asesor@uni.pe              → Visor2026!')
-  console.log('═'.repeat(55))
+  console.log('Iniciando el proceso de seed para YAKU V4.0...');
+
+  // =========================================================
+  // 0. LIMPIEZA DE DATOS (TRUNCATE)
+  // =========================================================
+  console.log('Limpiando base de datos...');
+  await prisma.$executeRawUnsafe(`
+    TRUNCATE TABLE logs_sistema, notificaciones, configuracion_notificaciones, alertas, tipos_alerta, 
+    riego, programacion_riego, plantillas_riego, predicciones_ml, usuario_modelo, historial_modelos, modelos_ml, 
+    configuracion_control, umbrales_config, lecturas_bateria, telemetria_tanque, 
+    temperatura_suelo, temperatura_ambiente, humedad_ambiente, humedad_suelo, 
+    configuracion_tanque, asignaciones_iot, cultivos, umbrales_planta, plantas, 
+    fuentes_agua, componentes, tipos_componente, tipos_metrica, 
+    dispositivos, tipos_dispositivo, usuarios, roles, reporte_consumo_agua,
+    distritos, provincias, regiones RESTART IDENTITY CASCADE;
+  `);
+
+  // =========================================================
+  // 1. ROLES Y USUARIOS
+  // =========================================================
+  console.log('Insertando Roles y Usuarios...');
+  await prisma.roles.createMany({
+    data: [
+      { id: 1, nombre: 'administrador', descripcion: 'Administrador global del sistema. Configura hardware, sensores y asigna agricultores.' },
+      { id: 2, nombre: 'agricultor', descripcion: 'Usuario final del campo. Gestiona sus cultivos, configura umbrales y activa/pausa el riego.' },
+    ],
+  });
+
+  await prisma.usuarios.createMany({
+    data: [
+      { id: 1, nombre: 'Carlos', apellido: 'Admin', correo: 'admin@yaku.com', contrasena: 'PBKDF2$PBKDF2WithHmacSHA256$310000$5um+93ZO/e7qS+wt5oSCdA==$5lgT69u+elGZWR+Oh+M37B8tlyatE8oJYlV95DaaTiI=', id_rol: 1, telefono: '+51999888777', zona_horaria: 'America/Lima', verificado: true, estado: true },
+      { id: 2, nombre: 'Juan', apellido: 'Perez', correo: 'juan.perez@yaku.com', contrasena: 'PBKDF2$PBKDF2WithHmacSHA256$310000$5um+93ZO/e7qS+wt5oSCdA==$5lgT69u+elGZWR+Oh+M37B8tlyatE8oJYlV95DaaTiI=', id_rol: 2, telefono: '+51987654321', zona_horaria: 'America/Lima', verificado: true, estado: true },
+    ],
+  });
+
+  // =========================================================
+  // 3. HARDWARE: TIPOS Y DISPOSITIVOS
+  // =========================================================
+  await prisma.tipos_dispositivo.createMany({
+    data: [
+      { id: 1, nombre: 'ESP32-S3 (Módulo Colector)', descripcion: 'Microcontrolador recolector de telemetría de suelo y ambiente.' },
+      { id: 2, nombre: 'ESP32 (Actuador y Nivel)', descripcion: 'Microcontrolador encargado del control de bomba y sensor ultrasónico.' },
+    ],
+  });
+
+  await prisma.dispositivos.createMany({
+    data: [
+      { id: 1, id_tipo: 1, nombre: 'Dispositivo Suelo & Clima A', mac_address: 'AA:BB:CC:DD:EE:01', client_id_mqtt: 'ESP32_Yaku_001', topic_pub: 'yaku/riego/datos', topic_sub: 'yaku/valvula/comando', ubicacion: 'Invernadero Tomate 1', estado: 'activo', funcionamiento_activo: true },
+      { id: 2, id_tipo: 2, nombre: 'Controlador Bomba Tanque 1', mac_address: 'AA:BB:CC:DD:EE:02', client_id_mqtt: 'ESP32_Yaku_002', topic_pub: 'yaku/tanque/datos', topic_sub: 'yaku/riego/comando', ubicacion: 'Estación de Bombeo Principal', estado: 'activo', funcionamiento_activo: true },
+      { id: 3, id_tipo: 2, nombre: 'Controlador Riego Jardín Exterior', mac_address: 'AA:BB:CC:DD:EE:03', client_id_mqtt: 'ESP32_Yaku_003', topic_pub: 'yaku/status', topic_sub: 'yaku/valvula/jardin', ubicacion: 'Jardín Lateral', estado: 'activo', funcionamiento_activo: true },
+    ],
+  });
+
+  // =========================================================
+  // 4. CATÁLOGO DE MÉTRICAS Y COMPONENTES
+  // =========================================================
+  await prisma.tipos_metrica.createMany({
+    data: [
+      { id: 1, codigo: 'HUM_SUELO', nombre: 'Humedad de Suelo', unidad: '%', descripcion: 'Porcentaje de humedad en la zona radicular.' },
+      { id: 2, codigo: 'HUM_AMB', nombre: 'Humedad Ambiente', unidad: '%', descripcion: 'Humedad relativa del aire circundante.' },
+      { id: 3, codigo: 'TEMP_AMB', nombre: 'Temperatura Ambiente', unidad: '°C', descripcion: 'Temperatura ambiente del aire.' },
+      { id: 4, codigo: 'TEMP_SUELO', nombre: 'Temperatura de Suelo', unidad: '°C', descripcion: 'Temperatura del suelo medida por sensor DS18B20.' },
+      { id: 5, codigo: 'NIVEL_AGUA', nombre: 'Nivel de Tanque', unidad: '%', descripcion: 'Porcentaje de volumen de agua en el reservorio.' },
+      { id: 6, codigo: 'BAT_PCT', nombre: 'Nivel de Batería', unidad: '%', descripcion: 'Carga restante de batería en porcentaje.' },
+    ],
+  });
+
+  await prisma.tipos_componente.createMany({
+    data: [
+      { id: 1, nombre_modelo: 'Higrómetro Capacitivo Suelo', categoria: 'sensor', id_tipo_metrica: 1, descripcion: 'Sensor de humedad de suelo capacitivo anti-corrosivo.' },
+      { id: 2, nombre_modelo: 'Higrómetro DHT22 (Humedad)', categoria: 'sensor', id_tipo_metrica: 2, descripcion: 'Sensor de humedad relativa ambiental DHT22.' },
+      { id: 3, nombre_modelo: 'Termómetro DHT22 (Temperatura)', categoria: 'sensor', id_tipo_metrica: 3, descripcion: 'Sensor de temperatura ambiental DHT22.' },
+      { id: 4, nombre_modelo: 'Termómetro DS18B20 Suelo', categoria: 'sensor', id_tipo_metrica: 4, descripcion: 'Termómetro de varilla de suelo DS18B20.' },
+      { id: 5, nombre_modelo: 'Sensor Ultrasónico HC-SR04', categoria: 'sensor', id_tipo_metrica: 5, descripcion: 'Sensor ultrasónico de distancia para tanques.' },
+      { id: 6, nombre_modelo: 'Módulo de Relé 5V', categoria: 'actuador', id_tipo_metrica: null, descripcion: 'Módulo de relé electromagnético para bombas o solenoides.' },
+      { id: 7, nombre_modelo: 'Módulo de Batería LiPo 18650', categoria: 'bateria', id_tipo_metrica: 6, descripcion: 'Módulo de alimentación y monitoreo por batería LiPo.' },
+    ],
+  });
+
+  await prisma.componentes.createMany({
+    data: [
+      { id: 1, id_tipo_componente: 1, numero_serie: 'SN_HUM_001', estado: 'activo' },
+      { id: 2, id_tipo_componente: 2, numero_serie: 'SN_DHT_001', estado: 'activo' },
+      { id: 3, id_tipo_componente: 3, numero_serie: 'SN_DHT_002', estado: 'activo' },
+      { id: 4, id_tipo_componente: 4, numero_serie: 'SN_TEMP_001', estado: 'activo' },
+      { id: 5, id_tipo_componente: 5, numero_serie: 'SN_ULTRA_001', estado: 'activo' },
+      { id: 6, id_tipo_componente: 6, numero_serie: 'SN_RELE_001', estado: 'activo' },
+      { id: 7, id_tipo_componente: 7, numero_serie: 'SN_BAT_001', estado: 'activo' },
+      { id: 8, id_tipo_componente: 7, numero_serie: 'SN_BAT_002', estado: 'activo' },
+      { id: 9, id_tipo_componente: 6, numero_serie: 'SN_RELE_002', estado: 'activo' },
+    ],
+  });
+
+  // =========================================================
+  // 6. FUENTES DE AGUA Y CULTIVOS
+  // =========================================================
+  await prisma.fuentes_agua.createMany({
+    data: [
+      { id: 1, id_usuario: 2, nombre: 'Tanque Principal Invernadero 1', tipo: 'tanque', capacidad_litros: 1100.00, altura_tanque_cm: 140.00, altura_seguridad_cm: 120.00 },
+      { id: 2, id_usuario: 2, nombre: 'Grifo Directo Manguera', tipo: 'manguera', capacidad_litros: null, altura_tanque_cm: null, altura_seguridad_cm: null },
+    ],
+  });
+
+  await prisma.plantas.createMany({
+    data: [
+      { id: 1, nombre: 'Tomate Cherry', tipo: 'Hortaliza', descripcion: 'Requiere humedad estable de suelo entre 40-70% y temperaturas entre 18-30°C.' },
+      { id: 2, nombre: 'Lechuga Orgánica', tipo: 'Hortaliza', descripcion: 'Planta de hoja verde con raíces superficiales. Sensible al estrés hídrico.' },
+    ],
+  });
+
+  await prisma.umbrales_planta.createMany({
+    data: [
+      { id: 1, id_planta: 1, id_tipo_metrica: 1, valor_minimo: 40.00, valor_maximo: 70.00 },
+      { id: 2, id_planta: 1, id_tipo_metrica: 3, valor_minimo: 15.00, valor_maximo: 32.00 },
+      { id: 3, id_planta: 2, id_tipo_metrica: 1, valor_minimo: 50.00, valor_maximo: 80.00 },
+    ],
+  });
+
+  await prisma.regiones.createMany({
+    data: [{ id: 1, nombre: 'Lima' }, { id: 2, nombre: 'Arequipa' }, { id: 3, nombre: 'La Libertad' }],
+  });
+
+  await prisma.provincias.createMany({
+    data: [
+      { id: 1, id_region: 1, nombre: 'Lima' },
+      { id: 2, id_region: 2, nombre: 'Caylloma' },
+      { id: 3, id_region: 2, nombre: 'Arequipa' },
+      { id: 4, id_region: 3, nombre: 'Trujillo' },
+    ],
+  });
+
+  await prisma.distritos.createMany({
+    data: [
+      { id: 1, id_provincia: 1, nombre: 'Santiago de Surco' },
+      { id: 2, id_provincia: 1, nombre: 'Miraflores' },
+      { id: 3, id_provincia: 2, nombre: 'Majes' },
+      { id: 4, id_provincia: 3, nombre: 'Arequipa' },
+      { id: 5, id_provincia: 4, nombre: 'Laredo' },
+    ],
+  });
+
+  await prisma.cultivos.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_planta: 1, id_fuente_agua: 1, id_distrito: 3, lugar: 'Parcela 45, Sector B', nombre_planta: 'Invernadero Tomate Cherry', etapa_crecimiento: 'Fructificación', area_m2: 50.00, fecha_siembra: new Date('2026-03-01T00:00:00Z'), estado: 'activo' },
+      { id: 2, id_usuario: 2, id_planta: 2, id_fuente_agua: 2, id_distrito: 1, lugar: 'Sector Alto, Invernadero 2', nombre_planta: 'Jardín Lechugas Hidropónicas', etapa_crecimiento: 'Crecimiento', area_m2: 20.00, fecha_siembra: new Date('2026-04-15T00:00:00Z'), estado: 'activo' },
+    ],
+  });
+
+  // =========================================================
+  // 8. ASIGNACIONES IOT Y CONFIG TANQUE
+  // =========================================================
+  console.log('Insertando Asignaciones IoT y Telemetría...');
+  await prisma.asignaciones_iot.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_dispositivo: 1, id_componente: 1, id_fuente_agua: null, id_cultivo: 1, pin_gpio: 17, activo: true },
+      { id: 2, id_usuario: 2, id_dispositivo: 1, id_componente: 2, id_fuente_agua: null, id_cultivo: 1, pin_gpio: 15, activo: true },
+      { id: 3, id_usuario: 2, id_dispositivo: 1, id_componente: 3, id_fuente_agua: null, id_cultivo: 1, pin_gpio: 15, activo: true },
+      { id: 4, id_usuario: 2, id_dispositivo: 1, id_componente: 4, id_fuente_agua: null, id_cultivo: 1, pin_gpio: 16, activo: true },
+      { id: 5, id_usuario: 2, id_dispositivo: 1, id_componente: 7, id_fuente_agua: null, id_cultivo: 1, pin_gpio: 34, activo: true },
+      { id: 6, id_usuario: 2, id_dispositivo: 2, id_componente: 5, id_fuente_agua: 1, id_cultivo: null, pin_gpio: 26, activo: true },
+      { id: 7, id_usuario: 2, id_dispositivo: 2, id_componente: 6, id_fuente_agua: 1, id_cultivo: 1, pin_gpio: 23, activo: true },
+      { id: 8, id_usuario: 2, id_dispositivo: 2, id_componente: 8, id_fuente_agua: null, id_cultivo: null, pin_gpio: 34, activo: true },
+      { id: 9, id_usuario: 2, id_dispositivo: 3, id_componente: 9, id_fuente_agua: 2, id_cultivo: 2, pin_gpio: 23, activo: true },
+    ],
+  });
+
+  await prisma.configuracion_tanque.createMany({
+    data: [
+      { id_asignacion: 7, valvula_abierta: false, bomba_encendida: true }, // Se actualiza directo al estado del UPDATE SQL
+      { id_asignacion: 9, valvula_abierta: false, bomba_encendida: false },
+    ],
+  });
+
+  await prisma.umbrales_config.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_cultivo: 1, id_tipo_metrica: 1, valor_minimo: 45.00, valor_maximo: 75.00 },
+      { id: 2, id_usuario: 2, id_cultivo: 1, id_tipo_metrica: 3, valor_minimo: 16.00, valor_maximo: 35.00 },
+      { id: 3, id_usuario: 2, id_cultivo: 1, id_tipo_metrica: 5, valor_minimo: 20.00, valor_maximo: 100.00 },
+    ],
+  });
+
+  await prisma.configuracion_control.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_cultivo: 1, duracion_riego_max_seg: 600, confianza_ml_minima: 0.75 },
+      { id: 2, id_usuario: 2, id_cultivo: 2, duracion_riego_max_seg: 300, confianza_ml_minima: 0.70 },
+    ],
+  });
+
+  // =========================================================
+  // 10. MODELOS ML Y PREDICCIONES
+  // =========================================================
+  await prisma.modelos_ml.createMany({
+    data: [
+      { id: 1, nombre_modelo: 'Random Forest Regresor Riego', algoritmo: 'RandomForest', descripcion: 'Modelo predictivo entrenado con históricos climáticos locales.', ruta_archivo: 'modelo_riego_rf.joblib', precision_modelo: 91.50, precision_score: 0.9150, recall_score: 0.8920, f1_score: 0.9030, version: '2.1.0', es_default: true, estado: 'activo', creado_por: 1, fecha_entrenamiento: new Date('2026-05-01T10:00:00Z') },
+      { id: 2, nombre_modelo: 'XGBoost Clasificador Riego', algoritmo: 'XGBoost', descripcion: 'Modelo predictivo de alta velocidad y precisión para bomba.', ruta_archivo: 'modelo_riego_xgb.joblib', precision_modelo: 93.20, precision_score: 0.9320, recall_score: 0.9210, f1_score: 0.9260, version: '1.0.0', es_default: false, estado: 'activo', creado_por: 1, fecha_entrenamiento: new Date('2026-05-15T14:30:00Z') },
+    ],
+  });
+
+  await prisma.usuario_modelo.createMany({
+    data: [ { id: 1, id_usuario: 2, id_modelo: 1, activo: true } ],
+  });
+
+  await prisma.historial_modelos.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_modelo: 1, accion: 'activado', descripcion: 'Se configuró Random Forest Regresor Riego como modelo activo del usuario.', fecha: new Date('2026-05-01T10:00:00Z') },
+      { id: 2, id_usuario: 2, id_modelo: 2, accion: 'desactivado', descripcion: 'Se desactivó XGBoost Clasificador Riego tras el cambio de modelo.', fecha: new Date('2026-05-15T14:30:00Z') },
+    ],
+  });
+
+  // =========================================================
+  // 11. HISTORIAL DE LECTURAS (Sensores)
+  // =========================================================
+  await prisma.humedad_suelo.createMany({
+    data: [
+      { id_asignacion: 1, valor: 46.20, porcentaje: 46.20, ema: 47.10, desviacion: 0.12, valido: true },
+      { id_asignacion: 1, valor: 45.80, porcentaje: 45.80, ema: 46.80, desviacion: 0.10, valido: true },
+      { id_asignacion: 1, valor: 45.10, porcentaje: 45.10, ema: 46.20, desviacion: 0.15, valido: true },
+    ],
+  });
+
+  await prisma.humedad_ambiente.createMany({
+    data: [
+      { id_asignacion: 2, valor: 60.50, porcentaje: 60.50, ema: 61.20, desviacion: 0.45, valido: true },
+      { id_asignacion: 2, valor: 59.80, porcentaje: 59.80, ema: 60.60, desviacion: 0.38, valido: true },
+    ],
+  });
+
+  await prisma.temperatura_ambiente.createMany({
+    data: [
+      { id_asignacion: 3, valor: 24.30, temperatura: 24.30, ema: 24.10, desviacion: 0.22, valido: true },
+      { id_asignacion: 3, valor: 24.70, temperatura: 24.70, ema: 24.30, desviacion: 0.19, valido: true },
+    ],
+  });
+
+  await prisma.temperatura_suelo.createMany({
+    data: [
+      { id_asignacion: 4, valor: 20.10, temperatura: 20.10, ema: 19.95, desviacion: 0.05, valido: true },
+      { id_asignacion: 4, valor: 20.30, temperatura: 20.30, ema: 20.10, desviacion: 0.04, valido: true },
+    ],
+  });
+
+  await prisma.lecturas_bateria.createMany({
+    data: [
+      { id_asignacion: 5, porcentaje: 95.00, voltaje: 4.12 },
+      { id_asignacion: 5, porcentaje: 92.50, voltaje: 4.08 },
+      { id_asignacion: 8, porcentaje: 88.00, voltaje: 3.98 },
+    ],
+  });
+
+  await prisma.telemetria_tanque.createMany({
+    data: [
+      { id_asignacion: 6, distancia_cm: 45.00, nivel_agua_cm: 95.00, porcentaje_nivel: 67.85, estado_nivel: 'optimo', valvula_abierta: false, bomba_encendida: false, fuente_control: 'automatico' },
+      { id_asignacion: 6, distancia_cm: 48.00, nivel_agua_cm: 92.00, porcentaje_nivel: 65.71, estado_nivel: 'optimo', valvula_abierta: false, bomba_encendida: true, fuente_control: 'automatico' },
+    ],
+  });
+
+  // =========================================================
+  // 12. PREDICCIONES Y RIEGOS
+  // =========================================================
+  await prisma.predicciones_ml.createMany({
+    data: [
+      { id: BigInt(1), id_usuario: 2, id_modelo: 1, id_cultivo: 1, variables_entrada: { humedad_suelo: 45.10, humedad_ambiente: 59.80, temperatura_ambiente: 24.70, temperatura_suelo: 20.30 }, recomendacion: 'regar', probabilidad: 0.88, accion_ejecutada: true, fuente_accion: 'automatico' },
+    ],
+  });
+
+  await prisma.riego.createMany({
+    data: [
+      { id_asignacion: 7, id_usuario: 2, id_modelo: 1, id_prediccion: BigInt(1), tipo_riego: 'automatico_ml', duracion_segundos: 120, cantidad_agua_litros: 15.50, motivo_cierre: 'riego_completado', estado: true },
+    ],
+  });
+
+  // =========================================================
+  // 13. ALERTAS Y NOTIFICACIONES
+  // =========================================================
+  console.log('Insertando Alertas y Logs...');
+  await prisma.tipos_alerta.createMany({
+    data: [
+      { id: 1, codigo: 'ALERT_HUM_BAJA', nombre: 'Humedad de suelo crítica baja', descripcion: 'La humedad del suelo ha descendido por debajo del límite de seguridad.', severidad: 'critico' },
+      { id: 2, codigo: 'ALERT_TEMP_ALTA', nombre: 'Temperatura ambiente crítica alta', descripcion: 'La temperatura ambiente en el invernadero excede los límites admisibles.', severidad: 'advertencia' },
+      { id: 3, codigo: 'ALERT_TANQUE_BAJO', nombre: 'Nivel de reservorio crítico bajo', descripcion: 'El volumen del tanque de almacenamiento está en niveles críticos.', severidad: 'critico' },
+    ],
+  });
+
+  await prisma.configuracion_notificaciones.createMany({
+    data: [
+      { id_usuario: 2, id_tipo_alerta: 1, activo: true, canal_email: true, canal_dashboard: true },
+      { id_usuario: 2, id_tipo_alerta: 2, activo: true, canal_email: false, canal_dashboard: true },
+      { id_usuario: 2, id_tipo_alerta: 3, activo: true, canal_email: true, canal_dashboard: true },
+    ],
+  });
+
+  await prisma.alertas.createMany({
+    data: [
+      { id: BigInt(1), id_usuario: 2, id_asignacion: 1, id_tipo_alerta: 1, id_tipo_metrica: 1, mensaje: '¡Alerta de Humedad! El sensor Higrómetro Suelo ha reportado un 43.50%, inferior al umbral mínimo de 45.00%.', prioridad: 'alta', valor_detectado: 43.50, umbral: 45.00, estado: 'pendiente' },
+    ],
+  });
+
+  await prisma.notificaciones.createMany({
+    data: [
+      { id_alerta: BigInt(1), id_usuario: 2, canal: 'email', asunto: 'YAKU: Alerta Crítica - Humedad de Suelo Baja', mensaje: 'Estimado Juan Perez, el cultivo Invernadero Tomate Cherry presenta una humedad del 43.50%, lo cual requiere riego urgente.', enviado: true, enviado_en: new Date('2026-05-24T16:00:00Z') },
+    ],
+  });
+
+  // =========================================================
+  // 14. PROGRAMACIONES DE RIEGO Y REPORTES
+  // =========================================================
+  await prisma.plantillas_riego.createMany({
+    data: [
+      { id: 1, nombre: 'Riego Interdiario Matutino', lunes: true, martes: false, miercoles: true, jueves: false, viernes: true, sabado: false, domingo: false, hora_inicio: new Date('1970-01-01T07:00:00.000Z'), duracion_seg: 300 },
+    ],
+  });
+
+  await prisma.programacion_riego.createMany({
+    data: [
+      { id_asignacion: 7, id_usuario: 2, id_plantilla: 1, nombre: 'Riego Matutino Interdiario', lunes: true, martes: false, miercoles: true, jueves: false, viernes: true, sabado: false, domingo: false, hora_inicio: new Date('1970-01-01T07:00:00.000Z'), duracion_seg: 300, activo: true },
+    ],
+  });
+
+  await prisma.reporte_consumo_agua.createMany({
+    data: [
+      { id: 1, id_usuario: 2, id_cultivo: 1, periodo_inicio: new Date('2026-05-01T00:00:00Z'), periodo_fin: new Date('2026-05-31T00:00:00Z'), consumo_total_litros: 450.50, consumo_manual_litros: 600.00, reduccion_porcentaje: 24.91, riegos_automaticos: 12, riegos_manuales: 2, riegos_programados: 4, duracion_total_segundos: 3200 },
+    ],
+  });
+
+  await prisma.logs_sistema.createMany({
+    data: [
+      { id_usuario: 2, accion: 'LOGIN', descripcion: 'Inicio de sesión exitoso desde IP 192.168.1.15' },
+      { id_usuario: 2, accion: 'SELECT_MODEL', descripcion: 'Cambió modelo activo a Random Forest Regresor Riego' },
+    ],
+  });
+
+  console.log('✅ Seed completado con éxito.');
 }
 
 main()
   .catch((e) => {
-    console.error('❌ Error en el seed:', e)
-    process.exit(1)
+    console.error('Error durante la ejecución del seed:', e);
+    process.exit(1);
   })
   .finally(async () => {
-    await prisma.$disconnect()
-  })
+    await prisma.$disconnect();
+  });

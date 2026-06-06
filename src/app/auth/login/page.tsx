@@ -4,6 +4,7 @@ import { getServerSession } from 'next-auth/next'
 import { redirect } from 'next/navigation'
 import LoginForm from '@/components/auth/LoginForm'
 import { Box, Text, Container } from '@radix-ui/themes'
+import { authOptions } from '@/lib/auth' // Asegúrate de que esta ruta apunte a tu auth.ts
 
 export const metadata = {
   title: 'Inicio de Sesión - Yaku',
@@ -11,7 +12,8 @@ export const metadata = {
 }
 
 export default async function LoginPage() {
-  const session = await getServerSession()
+  // Pasamos authOptions para que la sesión se evalúe correctamente en el servidor
+  const session = await getServerSession(authOptions)
   
   if (session) {
     redirect('/dashboard')

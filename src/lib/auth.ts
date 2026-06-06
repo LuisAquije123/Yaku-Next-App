@@ -1,8 +1,39 @@
 import { NextAuthOptions, Session } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import prisma from './prisma'
-import { verify } from 'argon2'
 import { JWT } from 'next-auth/jwt'
+import crypto from 'crypto' 
+
+// Función robusta para verificar PBKDF2 en múltiples formatos
+function verificarContrasena(passwordIngresado: string, hashAlmacenado: string): boolean {
+  try {
+    // 1. Formato de la imagen (Ej: PBKDF2$PBKDF2WithHmacSHA256$310000$salBase64$hashBase64)
+    if (hashAlmacenado.startsWith('PBKDF2$')) {
+      const parts = hashAlmacenado.split('$');
+      const iterations = parseInt(parts[2], 10);
+      const salt = Buffer.from(parts[3], 'base64');
+      const originalHash = Buffer.from(parts[4], 'base64');
+      
+      const derivedKey = crypto.pbkdf2Sync(passwordIngresado, salt, iterations, originalHash.length, 'sha256');
+      return crypto.timingSafeEqual(originalHash, derivedKey);
+    } 
+    // 2. Formato del SQL Seed (Ej: saltHexadecimal:hashHexadecimal)
+    else if (hashAlmacenado.includes(':')) {
+      const [saltHex, hashHex] = hashAlmacenado.split(':');
+      const salt = Buffer.from(saltHex, 'hex');
+      const originalHash = Buffer.from(hashHex, 'hex');
+      const iterations = 310000; // Iteraciones definidas en tu configuración
+      
+      const derivedKey = crypto.pbkdf2Sync(passwordIngresado, salt, iterations, originalHash.length, 'sha256');
+      return crypto.timingSafeEqual(originalHash, derivedKey);
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Error al verificar el hash de la contraseña:', error);
+    return false;
+  }
+}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -19,7 +50,7 @@ export const authOptions: NextAuthOptions = {
 
         const usuario = await prisma.usuarios.findUnique({
           where: { correo: credentials.correo },
-          include: { roles: true }
+          include: { rol: true } // Corregido: en tu schema.prisma la relación se llama "rol", no "roles"
         })
 
         if (!usuario) {
@@ -30,7 +61,9 @@ export const authOptions: NextAuthOptions = {
           throw new Error('Usuario inactivo')
         }
 
-        const esValido = await verify(usuario.contrasena, credentials.contrasena)
+        // Validación usando el módulo crypto y PBKDF2
+        const esValido = verificarContrasena(credentials.contrasena, usuario.contrasena)
+
         
         if (!esValido) {
           throw new Error('Contraseña incorrecta')
@@ -39,14 +72,14 @@ export const authOptions: NextAuthOptions = {
         // Log de inicio de sesión
         await prisma.logs_sistema.create({
           data: {
-            id_usuario: usuario.id_usuario,
+            id_usuario: usuario.id,
             accion: 'login',
-            descripcion: `Inicio de sesión: ${usuario.nombre}`
+            descripcion: `Inicio de sesión exitoso: ${usuario.nombre}`
           }
         }).catch((err: any) => console.error('Error al registrar log:', err))
 
         return {
-          id: usuario.id_usuario.toString(),
+          id: usuario.id.toString(),
           name: usuario.nombre,
           email: usuario.correo
         }
