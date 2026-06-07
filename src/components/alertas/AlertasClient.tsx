@@ -24,7 +24,7 @@ export default function AlertasClient({ userId, cultivos, initialData, initialCu
   return (
     <Box>
       <Flex justify="between" mb="6">
-        <Text size="6" weight="bold" color="white">Alertas</Text>
+        <Text size="6" weight="bold" color="indigo">Alertas</Text>
         <Select.Root value={initialCultivo.toString()} onValueChange={(v) => router.push(`?cultivo=${v}`)}>
           <Select.Trigger style={{ background: '#111827' }} />
           <Select.Content>
@@ -35,7 +35,7 @@ export default function AlertasClient({ userId, cultivos, initialData, initialCu
 
       {/* Alertas Activas */}
       <Box mb="6">
-         <Text size="3" weight="bold" color="white" mb="3">Alertas Activas</Text>
+         <Text size="3" weight="bold" color="indigo" mb="3">Alertas Activas</Text>
          {initialData.alertasActivas.map((a: any) => (
             <Card key={a.id} mb="3" style={{ background: '#111827', borderColor: '#ef4444' }}>
                <Flex justify="between"><Text color="red" weight="bold">{a.titulo}</Text><Badge color="red">Activa</Badge></Flex>
@@ -46,7 +46,7 @@ export default function AlertasClient({ userId, cultivos, initialData, initialCu
 
       <Grid columns={{ initial: '1', lg: '2' }} gap="5">
         <Card size="4" style={{ background: '#111827', borderColor: '#1f2937' }}>
-          <Text size="4" weight="bold" color="white" mb="5">Configuración de umbrales</Text>
+          <Text size="4" weight="bold" color="indigo" mb="5">Configuración de umbrales</Text>
           <Flex direction="column" gap="5">
             {umbrales.map((u: any) => (
               <Box key={u.id}>
@@ -59,7 +59,7 @@ export default function AlertasClient({ userId, cultivos, initialData, initialCu
         </Card>
 
         <Card size="4" style={{ background: '#111827', borderColor: '#1f2937' }}>
-          <Text size="4" weight="bold" color="white" mb="5">Historial de alertas</Text>
+          <Text size="4" weight="bold" color="indigo" mb="5">Historial de alertas</Text>
           {initialData.historial.map((h: any) => (
             <Flex key={h.id} justify="between" py="2" style={{ borderBottom: '1px solid #1f2937' }}>
                 <Text size="2" color="blue">{h.tipo}</Text>

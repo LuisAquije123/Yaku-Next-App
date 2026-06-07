@@ -63,9 +63,9 @@ export default function HistoricoMultiChart({
     <Grid columns="2fr 2fr 1fr 1fr 1fr" gap="3" align="center" py="3" style={{ borderBottom: isLast ? 'none' : '1px solid #1f2937' }}>
       <Text size="2" weight="bold" style={{ color }}>{label}</Text>
       <Text size="2" style={{ color: '#64748b', fontFamily: 'monospace' }}>{stat.sensor}</Text>
-      <Text size="2" color="white" style={{ fontFamily: 'monospace' }}>{stat.min !== null ? stat.min.toFixed(1) : '--'}</Text>
+      <Text size="2" color="indigo" style={{ fontFamily: 'monospace' }}>{stat.min !== null ? stat.min.toFixed(1) : '--'}</Text>
       <Text size="2" weight="bold" style={{ color, fontFamily: 'monospace' }}>{stat.prom !== null ? stat.prom.toFixed(1) : '--'}</Text>
-      <Text size="2" color="white" style={{ fontFamily: 'monospace' }}>{stat.max !== null ? stat.max.toFixed(1) : '--'}</Text>
+      <Text size="2" color="indigo" style={{ fontFamily: 'monospace' }}>{stat.max !== null ? stat.max.toFixed(1) : '--'}</Text>
     </Grid>
   );
 
@@ -76,7 +76,7 @@ export default function HistoricoMultiChart({
       <Card size="4" style={{ background: '#111827', borderColor: '#1f2937', borderRadius: '16px', minHeight: '500px' }}>
         <Flex justify="between" align="center" mb="6" wrap="wrap" gap="4">
           <Box>
-            <Text size="5" weight="bold" color="white" as="div" mb="2">
+            <Text size="5" weight="bold" color="indigo" as="div" mb="2">
               Los 4 parámetros — {initialRango} días
             </Text>
             <Select.Root value={initialCultivo} onValueChange={handleCultivoChange}>
@@ -128,7 +128,7 @@ export default function HistoricoMultiChart({
         {/* TARJETA 2: Estadísticas */}
         {stats && (
           <Card size="4" style={{ background: '#111827', borderColor: '#1f2937', borderRadius: '16px', height: '100%' }}>
-            <Text size="4" weight="bold" color="white" mb="5" as="div">
+            <Text size="4" weight="bold" color="indigo" mb="5" as="div">
               Estadísticas del período — {initialRango} días
             </Text>
             <Grid columns="2fr 2fr 1fr 1fr 1fr" gap="3" align="center" mb="2">
@@ -149,7 +149,7 @@ export default function HistoricoMultiChart({
 
         {/* TARJETA 3: Log de Riegos */}
         <Card size="4" style={{ background: '#111827', borderColor: '#1f2937', borderRadius: '16px', height: '100%' }}>
-          <Text size="4" weight="bold" color="white" mb="5" as="div">
+          <Text size="4" weight="bold" color="indigo" mb="5" as="div">
             Log de riegos
           </Text>
           
@@ -168,9 +168,9 @@ export default function HistoricoMultiChart({
               <Box>
                 {riegoLog.map((log: any, idx: number) => (
                   <Grid key={log.id} columns={{ initial: '1.5fr 1fr 1fr', sm: '2fr 1.5fr 1fr' }} gap="3" align="center" py="3" style={{ borderBottom: idx === riegoLog.length - 1 ? 'none' : '1px solid #1f2937' }}>
-                    <Text size="2" color="white" style={{ fontFamily: 'monospace' }}>{log.fechaStr}</Text>
+                    <Text size="2" color="indigo" style={{ fontFamily: 'monospace' }}>{log.fechaStr}</Text>
                     <Text size="2" weight="bold" style={{ color: log.colorOrigen, fontFamily: 'monospace' }}>{log.origen}</Text>
-                    <Text size="2" color="white" style={{ fontFamily: 'monospace' }}>{log.litros}{log.litros !== '--' ? 'L' : ''}</Text>
+                    <Text size="2" color="indigo" style={{ fontFamily: 'monospace' }}>{log.litros}{log.litros !== '--' ? 'L' : ''}</Text>
                   </Grid>
                 ))}
               </Box>
